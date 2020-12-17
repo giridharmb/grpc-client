@@ -7,7 +7,12 @@ import (
 	"google.golang.org/grpc"
 	"io"
 	"log"
+	"math/rand"
+	"time"
 )
+
+const charset = "abcdefghijklmnopqrstuvwxyz" +
+	"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 
 func main() {
 	fmt.Println("Iam a client")
@@ -28,6 +33,23 @@ func main() {
 
 	doServerStreaming(client)
 
+	doClientStreaming(client)
+
+}
+
+func StringWithCharset(length int, charset string) string {
+
+	var seededRand = rand.New(rand.NewSource(time.Now().UnixNano()))
+
+	b := make([]byte, length)
+	for i := range b {
+		b[i] = charset[seededRand.Intn(len(charset))]
+	}
+	return string(b)
+}
+
+func String(length int) string {
+	return StringWithCharset(length, charset)
 }
 
 func doUnary(client messagepb.MyDataServiceClient) {
@@ -72,4 +94,39 @@ func doServerStreaming(client messagepb.MyDataServiceClient) {
 		}
 		fmt.Printf("\nresponse read from data streaming server : %v", msg.GetResult())
 	}
+}
+
+func doClientStreaming(client messagepb.MyDataServiceClient) {
+	fmt.Printf("\nstarting to do cleint streaming rpc...")
+
+	stream, err := client.ClientStream(context.Background())
+	if err != nil {
+		log.Fatalf("\nerror while calling doCleintStreaming : %v", err)
+	}
+
+	requests := make([]*messagepb.DataRequestClientStream, 0)
+	for i := 0; i < 15; i++ {
+		myRandomString := StringWithCharset(10, charset)
+		myIndex := int32(i)
+
+		myData := &messagepb.DataRequestClientStream{
+			RandomString: myRandomString,
+			Index:        myIndex,
+		}
+		requests = append(requests, myData)
+
+	}
+
+	for _, req := range requests {
+		fmt.Printf("\nsending data...")
+		_ = stream.Send(req)
+		time.Sleep(300 * time.Millisecond)
+	}
+
+	resp, err := stream.CloseAndRecv()
+	if err != nil {
+		log.Fatalf("\nerror while receiving response from server :%v", err)
+	}
+	fmt.Printf("\nfinal response from server : %v", resp)
+
 }
