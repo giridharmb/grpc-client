@@ -35,6 +35,8 @@ func main() {
 
 	doClientStreaming(client)
 
+	doBidirectionalStreaming(client)
+
 }
 
 func StringWithCharset(length int, charset string) string {
@@ -97,7 +99,7 @@ func doServerStreaming(client messagepb.MyDataServiceClient) {
 }
 
 func doClientStreaming(client messagepb.MyDataServiceClient) {
-	fmt.Printf("\nstarting to do cleint streaming rpc...")
+	fmt.Printf("\nstarting to do client streaming rpc...")
 
 	stream, err := client.ClientStream(context.Background())
 	if err != nil {
@@ -129,4 +131,58 @@ func doClientStreaming(client messagepb.MyDataServiceClient) {
 	}
 	fmt.Printf("\nfinal response from server : %v", resp)
 
+}
+
+func doBidirectionalStreaming(client messagepb.MyDataServiceClient) {
+	fmt.Printf("\nBIDI : starting to do bi-directional streaming rpc...")
+
+	stream, err := client.BDStream(context.Background())
+	if err != nil {
+		log.Fatalf("\nBIDI : error while creating stream : %v", err)
+		return
+	}
+
+	waitChannel := make(chan struct{})
+
+	// populate data first to send to server
+	requests := make([]*messagepb.BDStreamMessageRequest, 0)
+	for i := 0; i < 15; i++ {
+		firstName := StringWithCharset(10, charset)
+		lastName := StringWithCharset(10, charset)
+
+		myData := &messagepb.BDStreamMessageRequest{
+			FirstName: firstName,
+			LastName:  lastName,
+		}
+		requests = append(requests, myData)
+	}
+
+	// function to send a bunch of messages
+	go func() {
+		for _, req := range requests {
+			fmt.Printf("\nBIDI : Sending message : %v", req)
+			_ = stream.Send(req)
+			time.Sleep(1000 * time.Millisecond)
+		}
+		_ = stream.CloseSend()
+	}()
+
+	// function to receivce a bunh of messages
+	go func() {
+		for {
+			res, err := stream.Recv()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				fmt.Printf("\nBIDI : error while receiving : %v", err)
+				break
+			}
+			fmt.Printf("\nBIDI : received : %v", res.GetHash())
+		}
+		close(waitChannel)
+	}()
+
+	// block until everything is done
+	<-waitChannel
 }

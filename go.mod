@@ -1,8 +1,8 @@
 module udemy/grpc/giridhar/client-streaming/client
 
-go 1.14
+go 1.15
 
 require (
-	github.com/giridharmb/grpc-messagepb v0.0.0-20201217224148-9dd056006a78
+	github.com/giridharmb/grpc-messagepb v0.0.0-20201218010843-80668b4eb6df
 	google.golang.org/grpc v1.34.0
 )
