@@ -2,17 +2,31 @@ package main
 
 import (
 	"context"
+	"crypto/md5"
 	"fmt"
 	"github.com/giridharmb/grpc-messagepb"
 	"google.golang.org/grpc"
 	"io"
 	"log"
 	"math/rand"
+	"os"
 	"time"
 )
 
 const charset = "abcdefghijklmnopqrstuvwxyz" +
 	"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+
+func errCheckFatal(e error, msg string) {
+	if e != nil {
+		log.Fatalf("\n(ERROR) : %v : %v", msg, e.Error())
+	}
+}
+
+func errCheckPrint(e error, msg string) {
+	if e != nil {
+		log.Printf("\n(ERROR) : %v : %v", msg, e.Error())
+	}
+}
 
 func main() {
 	fmt.Println("Iam a client")
@@ -29,13 +43,15 @@ func main() {
 
 	fmt.Printf("Created client : %f", client)
 
-	doUnary(client)
+	//doUnary(client)
+	//
+	//doServerStreaming(client)
+	//
+	//doClientStreaming(client)
+	//
+	//doBidirectionalStreaming(client)
 
-	doServerStreaming(client)
-
-	doClientStreaming(client)
-
-	doBidirectionalStreaming(client)
+	doBidirectionalDataTransfer(client)
 
 }
 
@@ -185,4 +201,112 @@ func doBidirectionalStreaming(client messagepb.MyDataServiceClient) {
 
 	// block until everything is done
 	<-waitChannel
+}
+
+type readBytesData struct {
+	readBytes      []byte
+	totalBytesRead int64
+	totalFileSize  int64
+}
+
+func getFileSize(filePath string) (int64, error) {
+	fi, err := os.Stat(filePath)
+	if err != nil {
+		return -1, err
+	}
+	size := fi.Size()
+	return size, nil
+}
+
+func readFileInChunks(fileName string, bytesChannel chan []byte) error {
+	const BufferSize = 4096
+	file, err := os.Open(fileName)
+	if err != nil {
+		fmt.Printf("(ERROR) : %v", err.Error())
+		return err
+	}
+	defer func() {
+		_ = file.Close()
+	}()
+	completeFileSize := 0
+	for {
+		buffer := make([]byte, BufferSize)
+		totalBytesRead, err := file.Read(buffer)
+		if err == io.EOF {
+			fmt.Printf("\nend-of-file\n")
+			close(bytesChannel)
+			break
+		}
+		if err != nil {
+			fmt.Printf("(ERROR) : %v", err.Error())
+			return err
+		}
+		fmt.Printf("\ntotalBytesRead: %v", totalBytesRead)
+		completeFileSize = completeFileSize + totalBytesRead
+		fmt.Printf("\ncompleteFileSize : %v", completeFileSize)
+		bytesChannel <- buffer[:totalBytesRead]
+
+	}
+	return nil
+}
+
+func doBidirectionalDataTransfer(client messagepb.MyDataServiceClient) {
+	fmt.Printf("\nBIDI : starting to do bi-directional streaming rpc...")
+
+	stream, err := client.BDTransfer(context.Background())
+	if err != nil {
+		log.Fatalf("\nBIDI_TRANSFER : error while creating stream : %v", err)
+		return
+	}
+
+	fileName := "random_data.bin"
+
+	readBytesChan := make(chan []byte)
+
+	waitChannel := make(chan struct{})
+
+	totalSizeBytes, _ := getFileSize(fileName)
+
+	//////////////////////////////////////////////////////
+
+	go func() {
+		for {
+			bytesArray, ok := <-readBytesChan
+			if !ok {
+				break
+			}
+			fmt.Printf("\n# 2:  (%x)\n", md5.Sum(bytesArray))
+
+			myRequest := &messagepb.BDTransferMessage{
+				Data:           bytesArray,
+				FileName:       fileName,
+				BytesTotalSize: totalSizeBytes,
+			}
+
+			_ = stream.Send(myRequest)
+		}
+		_ = stream.CloseSend()
+	}()
+
+	go func() {
+		_ = readFileInChunks(fileName, readBytesChan)
+	}()
+
+	go func() {
+		for {
+			res, err := stream.Recv()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				fmt.Printf("\nBIDI_TRANSFER : error while receiving : %v", err)
+				break
+			}
+			fmt.Printf("\nBIDI_TRANSFER : received : %v", res.GetPercentComplete())
+		}
+		close(waitChannel)
+	}()
+
+	<-waitChannel
+
 }
