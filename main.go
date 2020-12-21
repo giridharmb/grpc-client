@@ -2,13 +2,15 @@ package main
 
 import (
 	"context"
-	"crypto/md5"
+	"flag"
 	"fmt"
 	"github.com/giridharmb/grpc-messagepb"
 	"google.golang.org/grpc"
 	"io"
 	"log"
+	"math"
 	"math/rand"
+	"net"
 	"os"
 	"time"
 )
@@ -28,10 +30,94 @@ func errCheckPrint(e error, msg string) {
 	}
 }
 
-func main() {
-	fmt.Println("Iam a client")
+////////// Progress Bar - start /////////////
 
-	conn, err := grpc.Dial("localhost:50051", grpc.WithInsecure())
+var bar Bar
+
+type Bar struct {
+	percent int64  // progress percentage
+	cur     int64  // current progress
+	total   int64  // total value for progress
+	rate    string // the actual progress bar to be printed
+	graph   string // the fill value for progress bar
+}
+
+func (bar *Bar) getPercent() int64 {
+	return int64(float32(bar.cur) / float32(bar.total) * 100)
+}
+
+func (bar *Bar) NewOptionWithGraph(start, total int64, graph string) {
+	bar.graph = graph
+	bar.NewOption(start, total)
+}
+
+func (bar *Bar) Play(cur int64) {
+	bar.cur = cur
+	last := bar.percent
+	bar.percent = bar.getPercent()
+	if bar.percent != last && bar.percent%2 == 0 {
+		bar.rate += bar.graph
+	}
+	fmt.Printf("\r[%-50s]%3d%% %8d/%d", bar.rate, bar.percent, bar.cur, bar.total)
+}
+
+func (bar *Bar) NewOption(start, total int64) {
+	bar.cur = start
+	bar.total = total
+	if bar.graph == "" {
+		bar.graph = "#"
+	}
+	bar.percent = bar.getPercent()
+	for i := 0; i < int(bar.percent); i += 2 {
+		bar.rate += bar.graph // initial progress position
+	}
+}
+
+func (bar *Bar) Finish() {
+	fmt.Println()
+}
+
+func checkHostPort(host string, port string) bool {
+	timeout := 3 * time.Second
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, port), timeout)
+	if err != nil {
+		fmt.Printf("\nCould not establish connection to host (%v) and port (%v) : %v", host, port, err.Error())
+		return false
+	}
+	if conn != nil {
+		defer func() {
+			_ = conn.Close()
+		}()
+		//fmt.Println("Opened", net.JoinHostPort(host, port))
+	}
+	return true
+}
+
+////////// Progress Bar - end /////////////
+
+func main() {
+
+	bar.NewOption(0, 100)
+
+	var server string
+	flag.StringVar(&server, "server", "remote-host-1.company.com", "server hostname")
+
+	var fileName string
+	flag.StringVar(&fileName, "file", "file.txt", "name of the file to transfer")
+
+	var port string
+	flag.StringVar(&port, "port", "8080", "remote port on the server")
+
+	flag.Parse()
+
+	if _, err := os.Stat(fileName); os.IsNotExist(err) {
+		fmt.Printf("(ERROR) : (%v) does not exist", fileName)
+		return
+	}
+
+	hostAndPort := fmt.Sprintf("%v:%v", server, port)
+
+	conn, err := grpc.Dial(hostAndPort, grpc.WithInsecure())
 	if err != nil {
 		log.Fatalf("could not connect to server : %v", err)
 	}
@@ -39,9 +125,12 @@ func main() {
 		_ = conn.Close()
 	}()
 
-	client := messagepb.NewMyDataServiceClient(conn)
+	connectionValid := checkHostPort(server, port)
+	if connectionValid == false {
+		return
+	}
 
-	fmt.Printf("Created client : %f", client)
+	client := messagepb.NewMyDataServiceClient(conn)
 
 	//doUnary(client)
 	//
@@ -51,7 +140,7 @@ func main() {
 	//
 	//doBidirectionalStreaming(client)
 
-	doBidirectionalDataTransfer(client)
+	doBidirectionalDataTransfer(client, server, fileName)
 
 }
 
@@ -233,7 +322,7 @@ func readFileInChunks(fileName string, bytesChannel chan []byte) error {
 		buffer := make([]byte, BufferSize)
 		totalBytesRead, err := file.Read(buffer)
 		if err == io.EOF {
-			fmt.Printf("\nend-of-file\n")
+			// fmt.Printf("\nFile Scan Complete.\n")
 			close(bytesChannel)
 			break
 		}
@@ -241,17 +330,17 @@ func readFileInChunks(fileName string, bytesChannel chan []byte) error {
 			fmt.Printf("(ERROR) : %v", err.Error())
 			return err
 		}
-		fmt.Printf("\ntotalBytesRead: %v", totalBytesRead)
+		//fmt.Printf("\ntotalBytesRead: %v", totalBytesRead)
 		completeFileSize = completeFileSize + totalBytesRead
-		fmt.Printf("\ncompleteFileSize : %v", completeFileSize)
+		//fmt.Printf("\ncompleteFileSize : %v", completeFileSize)
 		bytesChannel <- buffer[:totalBytesRead]
 
 	}
 	return nil
 }
 
-func doBidirectionalDataTransfer(client messagepb.MyDataServiceClient) {
-	fmt.Printf("\nBIDI : starting to do bi-directional streaming rpc...")
+func doBidirectionalDataTransfer(client messagepb.MyDataServiceClient, server string, fileName string) {
+	//fmt.Printf("\nBIDI : starting to do bi-directional streaming rpc...")
 
 	stream, err := client.BDTransfer(context.Background())
 	if err != nil {
@@ -259,13 +348,17 @@ func doBidirectionalDataTransfer(client messagepb.MyDataServiceClient) {
 		return
 	}
 
-	fileName := "random_data.bin"
+	//fileName := "random_data.bin"
 
 	readBytesChan := make(chan []byte)
 
 	waitChannel := make(chan struct{})
 
 	totalSizeBytes, _ := getFileSize(fileName)
+
+	fmt.Println("Uploading...")
+
+	barGraphValueChannel := make(chan int64)
 
 	//////////////////////////////////////////////////////
 
@@ -275,14 +368,13 @@ func doBidirectionalDataTransfer(client messagepb.MyDataServiceClient) {
 			if !ok {
 				break
 			}
-			fmt.Printf("\n# 2:  (%x)\n", md5.Sum(bytesArray))
 
 			myRequest := &messagepb.BDTransferMessage{
 				Data:           bytesArray,
 				FileName:       fileName,
 				BytesTotalSize: totalSizeBytes,
 			}
-
+			//time.Sleep(10 * time.Millisecond)
 			_ = stream.Send(myRequest)
 		}
 		_ = stream.CloseSend()
@@ -302,11 +394,32 @@ func doBidirectionalDataTransfer(client messagepb.MyDataServiceClient) {
 				fmt.Printf("\nBIDI_TRANSFER : error while receiving : %v", err)
 				break
 			}
-			fmt.Printf("\nBIDI_TRANSFER : received : %v", res.GetPercentComplete())
+
+			//ceilValue := int(res.GetPercentComplete())
+			//fmt.Printf("\rTransferred : %3d%%", ceilValue)
+
+			value := int64(math.Ceil(float64(res.GetPercentComplete())))
+
+			barGraphValueChannel <- value
+
 		}
+		close(barGraphValueChannel)
 		close(waitChannel)
 	}()
 
+	go func() {
+		for {
+			value, ok := <-barGraphValueChannel
+			if !ok {
+				break
+			}
+			bar.Play(value)
+		}
+	}()
+
+	<-barGraphValueChannel
 	<-waitChannel
+
+	fmt.Printf("\nDone With File Transfer.")
 
 }
